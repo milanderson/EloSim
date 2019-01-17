@@ -134,7 +134,7 @@ def playtournament(players, team_size = 1, uncertainty=32, learning_rate = 1.0, 
             matches_played += 1
 
         uncertainty = max(learning_rate*uncertainty, 10)
-        #binedges = update_player_change_rates(players, uncertainty)
+        binedges = update_player_change_rates(players, uncertainty)
         
         
         if show_elo_every is not None and (j + 1) % show_elo_every == 0:
