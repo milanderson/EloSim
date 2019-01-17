@@ -9,7 +9,7 @@ LEARNING_RATE = 0.95
 
 def main():
     players = init_players()
-    playtournament(players, UNCERTAINTY, 10, False, 1, 1)
+    playtournament(players, 1, UNCERTAINTY, 10, False, 1, 1)
     # measure growth rate
     # L2 loss
     players.sort()
@@ -20,7 +20,7 @@ class Player:
         self.elo_tru = elo_tru
         self.gr = gr
         self.id = len(PUB_ELOS)
-        self.ranks = [0,0,0,0,0,0,0,0,0,0]
+        self.rank_dists = [0,0,0,0,0,0,0,0,0,0]
         self.rank_i = 0
         PUB_ELOS.append(elo_est)
 
@@ -39,17 +39,28 @@ class Player:
     def __eq__(self, other):
         return PUB_ELOS[self.id] == PUB_ELOS[other.id]
 
-    def add_change(self, rank):
-        self.ranks[self.rank_i] = rank
+    def add_change(self, bracket_avg_pub_elo, bracket_avg_tru_elo, playerlist, uncertainty):
+        # get elo distance from true rank
+        raw_dist = PUB_ELOS[self.id] - PUB_ELOS[playerlist[self.id].id]
+        
+        # calculate win/loss chance
+        pred_logit = bracket_avg_pub_elo - PUB_ELOS[self.id]
+        true_logit = bracket_avg_tru_elo - self.elo_tru
+        if raw_dist > 0:
+            pred_logit = float(PUB_ELOS[self.id] - bracket_avg_pub_elo)/400.0
+            true_logit = float(self.elo_tru - bracket_avg_tru_elo)/400.0
+
+        pred_winchance = 1.0/(1.0 + 10.0**pred_logit)
+        true_winchance = 1.0/(1.0 + 10.0**true_logit)
+
+        #calculate update amount for each game
+        update_amount = 1 + uncertainty*(1 - pred_winchance)
+
+        self.rank_dists[self.rank_i] = abs(raw_dist) / (true_winchance*update_amount)
         self.rank_i = (self.rank_i + 1) % 10
 
     def get_change_rate(self):
-        cr = 0
-        for i in range(1, len(self.ranks)):
-            distA = self.id - self.ranks[(self.rank_i + i) % 10]
-            distB = self.id - self.ranks[(self.rank_i + i + 1) % 10]
-            cr += 1.0 + float(float(abs(distA) - abs(distB)) / (len(PUB_ELOS)/4))
-        return cr/9.0
+        return sum(self.rank_dists)/10.0
 
     def get_elo(self):
         return PUB_ELOS[self.id]
@@ -82,43 +93,49 @@ class PlayerBracket(object):
     Matches all provided players, and adjusts their estimated scores based on match results
         @players            the list of players
         @uncertainty        the adjustment rate. equivalent to the amount of points won/lost per match
+        @learning_rate      the rate of decay on the uncertainty
         @rounds             the number of matches to play
-        @userbrackets       the number of brackets (players match players only within their bracket)
-        @show_elo_every     how often to draw the estimated Elo distribution. If None, nothing is shown.
-        @show_dist_every    how often to draw the estimated versus real Elo. If None, nothing is shown.
+        @usebrackets        the number of brackets (players match players only within their bracket)
+        @show_elo_every     how often to draw the estimated Elo distribution. If None, nothing is shown
+        @show_dist_every    how often to draw the estimated versus real Elo. If None, nothing is shown
+        @show_loss_every    how often to draw the average turns to correct rank. If None, nothing is shown
 '''
-def playtournament(players, uncertainty, learning_rate = 1.0, rounds=20, usebrackets=True, show_elo_every=None, show_dist_every=None, show_loss_every=None):
-    bins = [0]
+def playtournament(players, team_size = 1, uncertainty=32, learning_rate = 1.0, rounds=20, usebrackets=True, show_elo_every=None, show_dist_every=None, show_loss_every=None):
+    poolsize = len(players)
     if usebrackets:
         # calculate the bin sizes, round each bin to an even number of players
         hist, binedges = np.histogram(PUB_ELOS, bins=23)
 
-        edge = 1
+        poolsize = 0
         for i in range(len(players)):
-            player = players[i]
-            if edge < len(binedges) and PUB_ELOS[player.id] > binedges[edge]:
-                bins.append(i)
-                edge += 1
-        bins.append(len(players))
-    else:
-        bins = [0, len(players)]
+            if PUB_ELOS[players[i].id] > binedges[1]:
+                break
+            poolsize += 1
 
     for j in range(rounds):
         print("Round " + str(j + 1))
+            
+        playing_ppl = range(poolsize)
+        matches_played = 0
         # pair players within their skill bracket, match them and record the new scores
-        for i in range(len(bins) - 1):
-            bracket = PlayerBracket(players, bins[i], bins[i+1])
-            np.random.shuffle(bracket)
-            pair = 0
-            while pair < len(bracket) - 1:
-                playmatch(bracket[pair], bracket[pair + 1], uncertainty)
-                pair += 2
+        while 2*matches_played < len(players) - 1:
+            if playing_ppl[len(playing_ppl) - 1] < len(players) - 1:
+                playing_ppl.append(playing_ppl[len(playing_ppl) - 1] + 1)
 
-        uncertainty *= learning_rate
+            match_pool = [playing_ppl.pop(0)]
 
-        players.sort()
-        for i in range(len(players)):
-            players[i].add_change(i)
+            for i in range((team_size*2) - 1):
+                index = np.random.randint(len(playing_ppl))
+                match_pool.append(playing_ppl.pop(index))
+
+            teamA, teamB = maketeams([players[i] for i in match_pool])
+
+            playmatch(teamA, teamB, uncertainty)
+            matches_played += 1
+
+        uncertainty = max(learning_rate*uncertainty, 10)
+        #binedges = update_player_change_rates(players, uncertainty)
+        
         
         if show_elo_every is not None and (j + 1) % show_elo_every == 0:
             plt.hist(np.array(PUB_ELOS), bins=23)
@@ -143,59 +160,27 @@ def playtournament(players, uncertainty, learning_rate = 1.0, rounds=20, usebrac
             plt.show()
 
         if show_loss_every is not None and (j + 1) % show_loss_every == 0:
-            hist, binedges = np.histogram(PUB_ELOS, bins=23)
 
-            bin_trap = [0]
-            bin_loss = [0]
-            bin_cr = [0]
-            bin_size = [0]
-            bin_ind = 0
+            bin_errors = [0]
+            count = 0
             edge = 1
             for i in range(len(players)):
-                if edge + 1 < len(binedges):
-                    if PUB_ELOS[players[i].id] < binedges[edge]:
-                        bin_trap[bin_ind] += ((players[i].id - i)**2) / players[i].get_change_rate()
-                        bin_loss[bin_ind] += (players[i].id - i)**2
-                        bin_cr[bin_ind] += players[i].get_change_rate()
-                        bin_size[bin_ind] += 1
-                    else:
-                        if edge + 2 < len(binedges):
-                            bin_ind += 1
-                            bin_trap.append(0)
-                            bin_loss.append(0)
-                            bin_cr.append(0)
-                            bin_size.append(0)
-                        edge += 1
-
-            meas1 = [bin_trap[i]/bin_size[i] for i in range(len(bin_size))]
-            meas2 = [(bin_loss[i]/bin_cr[i])/bin_size[i] for i in range(len(bin_size))]
+                if PUB_ELOS[players[i].id] < binedges[edge]:
+                    count += 1
+                    bin_errors[edge-1] += players[i].get_change_rate()
+                else:
+                    bin_errors[edge-1] /= count
+                    count = 1
+                    edge += 1
+                    bin_errors.append(players[i].get_change_rate())
+                if i == len(players) - 1:
+                    bin_errors[edge-1] /= count
             
-            #print("------------------------")
-            #for i in range(len(meas1)):
-            #    print("Tot L:" + str(bin_trap[i]) + " Tot L2: " + str(bin_loss[i]) + " Tot Cr: " + str(bin_cr[i]) + " Bin Size: " + str(bin_size[i]))
-            #    print("Avg L: " + str(meas1[i]) + " Cum Avg L: " + str(meas2[i]))
-            
-            x = range(1, len(meas1) + 1)
-            plt.plot(x, bin_loss, 'ro-', label="L2 Loss")
+            x = range(1, len(bin_errors) + 1)
+            plt.plot(x, bin_errors, 'ro-')
             plt.xlabel('Bracket Number')
-            plt.ylabel('Loss')
+            plt.ylabel('Avg Expected Matches to Rank')
             plt.title('Round ' + str(j + 1) + ' Convergence Rate')
-            plt.legend()
-            plt.show()
-
-            x = range(1, len(meas1) + 1)
-            plt.plot(x, meas1, 'bo-', label="Average Loss")
-            plt.xlabel('Bracket Number')
-            plt.ylabel('Loss/Rate of Change')
-            plt.title('Round ' + str(j + 1) + ' Convergence Rate')
-            plt.legend()
-            plt.show()
-
-            plt.plot(x, meas2, 'go-', label="Cumulative Average Loss")
-            plt.xlabel('Bracket Number')
-            plt.ylabel('Loss/Rate of Change')
-            plt.title('Round ' + str(j + 1) + ' Convergence Rate')
-            plt.legend()
             plt.show()
 
 '''
@@ -204,27 +189,89 @@ def playtournament(players, uncertainty, learning_rate = 1.0, rounds=20, usebrac
         @playerB            the second player in the match
         @uncertainty        the weight of a win/loss
 '''
-def playmatch(playerA, playerB, uncertainty):
+def playmatch(teamA, teamB, uncertainty):
         # uses the logistic function for estimating win probability
-        playerA_elo = PUB_ELOS[playerA.id]
-        playerB_elo = PUB_ELOS[playerB.id]
-        A_true_logit = float(playerB.elo_tru - playerA.elo_tru)/400.0
-        A_pred_logit = float(playerB_elo - playerA_elo)/400.0
-        A_pred_winchance = 1.0/(1.0 + 10.0**A_pred_logit)
+        teamA_elo_t = sum([player.elo_tru for player in teamA])
+        teamB_elo_t = sum([player.elo_tru for player in teamB])
+        teamA_elo_p = sum([PUB_ELOS[player.id] for player in teamA])
+        teamB_elo_p = sum([PUB_ELOS[player.id] for player in teamB])
+
+        A_true_logit = float(teamB_elo_t - teamA_elo_t)/400.0
+        A_pred_logit = float(teamB_elo_p - teamA_elo_p)/400.0
         A_true_winchance = 1.0/(1.0 + 10.0**A_true_logit)
+        A_pred_winchance = 1.0/(1.0 + 10.0**A_pred_logit)
 
         # update scores
         if coinflip(A_true_winchance):
-            PUB_ELOS[playerA.id] += uncertainty*(1 - A_pred_winchance)
-            PUB_ELOS[playerB.id] += uncertainty*(A_pred_winchance - 1)
+            for i in range(len(teamA)):
+                PUB_ELOS[teamA[i].id] += uncertainty*(1 - A_pred_winchance)
+                PUB_ELOS[teamB[i].id] += uncertainty*(A_pred_winchance - 1)
         else:
-            PUB_ELOS[playerA.id] += uncertainty*(-A_pred_winchance)
-            PUB_ELOS[playerB.id] += uncertainty*(A_pred_winchance)
+            for i in range(len(teamA)):
+                PUB_ELOS[teamA[i].id] += uncertainty*(-A_pred_winchance)
+                PUB_ELOS[teamB[i].id] += uncertainty*(A_pred_winchance)
+
+def update_player_change_rates(players, uncertainty):
+    hist, binedges = np.histogram(PUB_ELOS, bins=32)
+    players.sort()
+    binedges[len(binedges) - 1] += 1
+
+    edge = 1
+    avg_tru_elo = [0]
+    avg_pub_elo = [0]
+    count = 0
+    for i in range(len(players)):
+        if PUB_ELOS[players[i].id] < binedges[edge]:
+            count += 1
+            if len(avg_tru_elo) < edge:
+                avg_tru_elo.append(players[i].elo_tru)
+                avg_pub_elo.append(PUB_ELOS[players[i].id])
+            else:
+                avg_tru_elo[edge - 1] += players[i].elo_tru
+                avg_pub_elo[edge - 1] += PUB_ELOS[players[i].id]
+        else:
+            if count != 0:
+                avg_tru_elo[edge - 1] /= count
+                avg_pub_elo[edge - 1] /= count
+            edge += 1
+            count = 0
+            i -= 1
+            if PUB_ELOS[players[i].id] < binedges[edge]:
+                count = 1
+                avg_tru_elo.append(players[i].elo_tru)
+                avg_pub_elo.append(PUB_ELOS[players[i].id])
+        if i + 1 == len(players):
+            avg_tru_elo[edge - 1] /= count
+            avg_pub_elo[edge - 1] /= count
+
+    edge = 1
+    for i in range(len(players)):
+        if PUB_ELOS[players[i].id] > binedges[edge]:
+            edge += 1
+        players[i].add_change(avg_pub_elo[edge - 1], avg_tru_elo[edge - 1], players, uncertainty)
+    return binedges
 
 def coinflip(win_chance=0.5):
     if np.random.uniform(0, 1) > win_chance:
         return False
     return True
+
+# split the playerlist into two approximately equal sub-lists (uses greedy approach)
+def maketeams(playerlist):
+    teamA = [playerlist[len(playerlist) - 1]]
+    teamB = []
+    eloA = PUB_ELOS[teamA[0].id]
+    eloB = 0
+
+    for i in range(1, len(playerlist)):
+        player = playerlist[len(playerlist) - i - 1]
+        if eloA > eloB:
+            teamB.append(player)
+            eloB += PUB_ELOS[player.id]
+        else:
+            teamA.append(player)
+            eloA += PUB_ELOS[player.id]
+    return teamA, teamB
 
 def init_players(playercount=10000):
     f = open('data/chess_ratings.pkl','rb')
