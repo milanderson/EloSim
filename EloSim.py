@@ -51,9 +51,18 @@ class Player:
             true_winchance = 1.0/(1.0 + 10.0**true_logit)
 
             #calculate update amount for each game
-            update_amount = 1 + uncertainty*(1 - pred_winchance)
+            win_amount = uncertainty*(1.0 - pred_winchance)
+            loss_amount = uncertainty*(-pred_winchance)
+            expected_match_val = float((true_winchance*win_amount)) + float((1.0 - true_winchance)*loss_amount)
+            if expected_match_val == 0.0 or abs(expected_match_val) < 0.5:
+                if expected_match_val >= 0.5:
+                    expected_match_val = 0.5
+                else:
+                    expected_match_val = -0.5
 
-            self.rank_dists[self.rank_i] = abs(raw_dist) / (true_winchance*update_amount)
+            self.rank_dists[self.rank_i] = raw_dist / expected_match_val
+            if self.rank_dists[self.rank_i] < 0:
+                self.rank_dists[self.rank_i] = abs(raw_dist) / 0.5
             self.rank_i = (self.rank_i + 1) % 10
         except Exception as e:
             print(e, PUB_ELOS[self.id], bracket_avg_pub_elo, self.elo_tru, bracket_avg_tru_elo)
@@ -209,7 +218,7 @@ def playmatch(teamA, teamB, uncertainty):
                 PUB_ELOS[teamB[i].id] += uncertainty*(A_pred_winchance)
 
 def update_player_change_rates(players, uncertainty):
-    hist, binedges = np.histogram(PUB_ELOS, bins=32)
+    hist, binedges = np.histogram(PUB_ELOS, bins=23)
     players.sort()
     binedges[len(binedges) - 1] += 1000
 
